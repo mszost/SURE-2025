@@ -1,7 +1,5 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-
 
 if __name__ == '__main__':
     # convert excel to csv
@@ -34,19 +32,9 @@ if __name__ == '__main__':
     # remove redundant columns 
     df = df.drop(['mrn', 'rif', 'rpl', 'rpl_1', 'rif_1'], axis=1)
 
-    # remove features with low correlation to the target
-    #df.drop(['th17_cd4_il17_ifn_pos', 'th17_cd4_il17_ifn_neg', 'double_pos_neg_ratio'], axis=1)
-
-    # for rows where the target is empty, set it 0
+    # filter out all rows of the target column which are 0 or empty
     df.fillna({'target': 0}, inplace=True)
-    # filter out rows for which the target is empty or 0
     df = df[df['target'] != 0.0]
-
-    # fill empty with 0 for endometriosis, adenomyosis, pcos, and fibroids
-    df.fillna({'endometriosis': 0}, inplace=True)
-    df.fillna({'adenomyosis': 0}, inplace=True)
-    df.fillna({'pcos': 0}, inplace=True)
-    df.fillna({'fibroids': 0}, inplace=True)
 
     # clean gestational age column ("new" becomes 0)
     df['ga'] = pd.to_numeric(df['ga'], errors='coerce')
@@ -57,22 +45,26 @@ if __name__ == '__main__':
     df.loc[is_lt_one, 'th17_cd4'] = 0.1
     df['th17_cd4'] = pd.to_numeric(df['th17_cd4'])
 
+    # fill empty with 0 for endometriosis, adenomyosis, pcos, and fibroids
+    df.fillna({'endometriosis': 0}, inplace=True)
+    df.fillna({'adenomyosis': 0}, inplace=True)
+    df.fillna({'pcos': 0}, inplace=True)
+    df.fillna({'fibroids': 0}, inplace=True)
+
     # interpolate missing values
-    cols_to_interp = [ 'th17_cd4', 'treg_cd25_cd127', 'th17_cd4_il17_ifn_pos', 'th17_cd4_il17_ifn_neg']
+    cols_to_interp = ['th17_cd4', 'treg_cd25_cd127', 'th17_cd4_il17_ifn_pos', 'th17_cd4_il17_ifn_neg']
     df[cols_to_interp] = df[cols_to_interp].interpolate(method='linear', limit_direction='both')
+    df[cols_to_interp] = df[cols_to_interp].fillna(df[cols_to_interp].median()) # catch any left over NaNs
 
-    # fill any left over empty values with their respective medians
-    df[cols_to_interp] = df[cols_to_interp].fillna(df[cols_to_interp].median())
+    # calculate ratios 
+    df['th17_treg_ratio'] = df['th17_cd4'] / df['treg_cd25_cd127'].replace(0, np.nan)
+    df['double_pos_neg_ratio'] = df['th17_cd4_il17_ifn_pos'] / df['th17_cd4_il17_ifn_neg'].replace(0, np.nan)
+    # handle errors caused by division by zero
+    df['th17_treg_ratio'].fillna(0.05, inplace=True)  # df['th17_treg_ratio'].median()
+    df['double_pos_neg_ratio'].fillna(0.05, inplace=True)  # df['double_pos_neg_ratio'].median()
 
-    # manually calculate ratios
-    df['th17_treg_ratio'] = df['th17_cd4'] / df['treg_cd25_cd127']
-    df['double_pos_neg_ratio'] = df['th17_cd4_il17_ifn_pos'] / df['th17_cd4_il17_ifn_neg']
-
-    # normalization
-    cols_to_normalize = ['ga', 'th17_cd4', 'treg_cd25_cd127','th17_cd4_il17_ifn_pos', \
-        'th17_cd4_il17_ifn_neg', 'double_pos_neg_ratio', 'th17_treg_ratio']
-    df[cols_to_normalize] = MinMaxScaler().fit_transform(df[cols_to_normalize])
+    # remove features with low correlation to the target
+    # df.drop(['th17_cd4_il17_ifn_pos', 'th17_cd4_il17_ifn_neg', 'double_pos_neg_ratio'], axis=1)
 
     # export 
-    df.to_csv('../data/processed/4th_jun18_sklearn_normalized_RPLControl.csv', index=False)
-    
+    df.to_csv('../data/processed/clean_RPLControl_Th17.csv', index=False)
