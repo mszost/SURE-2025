@@ -1,23 +1,30 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
+from collections import Counter
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, LabelEncoder
+from sklearn.decomposition import PCA
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.linear_model import LogisticRegression
 
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.neural_network import MLPClassifier
+from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.svm import SVC, LinearSVC
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 
 from factor_analyzer import FactorAnalyzer
 from factor_analyzer.factor_analyzer import calculate_kmo, calculate_bartlett_sphericity
+from factor_analyzer.rotator import Rotator
 
-from imblearn.over_sampling import SMOTE
-from collections import Counter
+from imblearn.over_sampling import SMOTE, SMOTENC, BorderlineSMOTE, SVMSMOTE, ADASYN
+from imblearn.under_sampling import EditedNearestNeighbours, NearMiss, InstanceHardnessThreshold
+from imblearn.combine import SMOTETomek
+from imblearn.combine import SMOTEENN
 
 class C:
     HEADER = '\033[95m'
@@ -32,22 +39,45 @@ class C:
 
 
 def factor_analysis(X_train, X_test):
-    feats_for_fa = ['ga', 'th17_cd4', 'th17_cd4_il17_ifn_pos', 'th17_cd4_il17_ifn_neg', 'treg_cd25_cd127',
-        'double_pos_neg_ratio', 'th17_treg_ratio']
+    feats_for_fa = ['ga', 'th17', 'ifn_pos', 'pos_neg_ratio', 'th17_treg_ratio'] #'ifn_neg', 'treg']
 
-    n_factors=4
-    fa = FactorAnalyzer(n_factors=n_factors, rotation='varimax', method='principal')
+    n_factors=3
+    fa = FactorAnalyzer(n_factors=n_factors, rotation='oblimin', method='minres', use_smc=True)
     fa.fit(X_train[feats_for_fa])
 
-    # get FA scores for both training and test sets
+    #kmo_all, kmo_per_variable = calculate_kmo(X_train[feats_for_fa])
+    #bartlett_chi_square, bartlett_p_value = calculate_bartlett_sphericity(X_train[feats_for_fa])
+    #print('KMO', kmo_all)
+
+    #scree plot
+    # ev, v = fa.get_eigenvalues()
+    # plt.figure(figsize=(10, 6))
+    # plt.plot(range(1, len(ev) + 1), ev, marker='o')
+    # plt.title('Scree Plot')
+    # plt.xlabel('Number of Factors')
+    # plt.ylabel('Eigenvalue')
+    # plt.grid(True)
+    # plt.axhline(y=1, color='r', linestyle='--', label='Kaiser Criterion (Eigenvalue > 1)')
+    # plt.legend()
+    # plt.xticks(range(1, len(ev) + 1))
+    # plt.show()
+
+    # get factor loadings
+    loadings = pd.DataFrame(fa.loadings_, index=X_train[feats_for_fa].columns,
+                      columns=[f'Factor {i+1}' for i in range(n_factors)])
+    print("\nFactor loadings:\n", loadings.round(3))
+
+    # get factor scores
     fa_transform = lambda data : pd.DataFrame(fa.transform(data[feats_for_fa]),
-                                            columns=[f'factor_score_{i+1}' for i in range(n_factors)],
+                                            columns=[f'factor_{i+1}' for i in range(n_factors)],
                                             index=data.index)
 
     X_train_fa_scores = fa_transform(X_train)
     X_test_fa_scores = fa_transform(X_test)
 
-    # remove orignal (factorized) features 
+    print(X_train_fa_scores)
+
+    # remove source features
     X_train = X_train.drop(columns=feats_for_fa)
     X_test = X_test.drop(columns=feats_for_fa)
 
@@ -55,17 +85,17 @@ def factor_analysis(X_train, X_test):
     X_train = pd.concat([X_train, X_train_fa_scores], axis=1)
     X_test = pd.concat([X_test, X_test_fa_scores], axis=1)
 
-    #print(X_train)
+    #print(f'X_train: \n{X_train}')
+    #print(f'X_test: \n{X_test}')
     return X_train, X_test
 
 
-def gridsearch(model_name, model_instance, X_train, X_test, y_train):
+def grid_search(model_name, model_instance, X_train, X_test, y_train):
     print(f'\n{C.BOLD+C.BLUE}[{model_name}]{C.END} Starting GridSearchCV ...')
 
     match model_name:
         case 'Random Forest':
             param_grid = {
-               'n_estimators': [100],
                'max_features': ['sqrt', 'log2', 0.8, 1, None],
                'max_depth': [30, None],
                'min_samples_split': [2, 5],
@@ -75,7 +105,6 @@ def gridsearch(model_name, model_instance, X_train, X_test, y_train):
             }
         case 'Gradient Boost':
             param_grid = {
-                'n_estimators': [100],
                 'learning_rate': [0.05, 0.1, 0.2],
                 'max_depth': [3, 4, 5, 7],
                 'subsample': [0.7, 0.8, 0.9, 1.0],
@@ -126,34 +155,44 @@ def main(datasets, models, iterations=1, gscv=False, clf_report=False):
         print(f'Using data file: {csv_path}')
         performance_summary[csv_path] = {}
 
+        # load data
+        df = pd.read_csv(csv_path)
+        X = df.drop('target', axis=1)
+        y = df['target']
+
+        # plot correlation heatmap
+        # plt.figure(figsize=(10, 10))
+        # sns.heatmap(df.corr(), annot=True, cmap='coolwarm', fmt=".2f")
+        # plt.title('Correlation Heatmap')
+        # plt.show()
+
+        # evaluate models
         for name, model_instance in list(models.items()):
             accuracies = []
+
             for i in range(iterations):
                 if clf_report: 
                     print(f'\n{'_'*60}')
+
                 print(f'\r{C.BOLD+C.BLUE}[{name}]{C.END} Running model evaluation ({C.BOLD+C.GREEN}{i+1}/{iterations}{C.END}) ', end='', flush=True)
 
-                # evaluate model
-                df = pd.read_csv(csv_path)
-                X = df.drop('target', axis=1)
-                y = df['target']
-                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y)  # stratify=y to ensure train/test sets have similar class proportions to the original data
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=0)
 
-                #apply normalization
-                scaler = MinMaxScaler()
-                cols_to_normalize = ['ga', 'th17_cd4', 'treg_cd25_cd127', 'th17_cd4_il17_ifn_pos', 'th17_cd4_il17_ifn_neg', 'double_pos_neg_ratio', 'th17_treg_ratio',]
+                # apply normalization
+                scaler = StandardScaler()
+                cols_to_normalize = ['ga', 'th17', 'ifn_pos', 'ifn_neg', 'treg', 'pos_neg_ratio', 'th17_treg_ratio']
                 X_train[cols_to_normalize] = scaler.fit_transform(X_train[cols_to_normalize])
                 X_test[cols_to_normalize] = scaler.transform(X_test[cols_to_normalize])
 
-                # apply factor analysis
-                X_train, X_test = factor_analysis(X_train, X_test)
+                #factor_analysis(X_train, X_test)
 
-                # apply SMOTE
-                X_train, y_train = SMOTE(sampling_strategy='minority', k_neighbors=5).fit_resample(X_train, y_train)
+                # apply oversampling and undersampling
+                X_train, y_train  = SMOTENC(random_state=0, k_neighbors=5, categorical_features=['endometriosis', 'adenomyosis', 'pcos', 'fibroids']).fit_resample(X_train, y_train)
+                X_train, y_train = EditedNearestNeighbours(sampling_strategy='majority', kind_sel='mode').fit_resample(X_train, y_train)
 
-                # apply GridSearchCV
+                # apply grid search
                 if gscv:
-                    model_instance, y_pred = gridsearch(name, model_instance, X_train, X_test, y_train)
+                    model_instance, y_pred = grid_search(name, model_instance, X_train, X_test, y_train)
                 else:
                     model_instance.fit(X_train, y_train)
                     y_pred = model_instance.predict(X_test)
@@ -163,7 +202,6 @@ def main(datasets, models, iterations=1, gscv=False, clf_report=False):
                     print(f'Confusion Matrix:\n {confusion_matrix(y_test, y_pred)}')
 
                 accuracy = accuracy_score(y_test, y_pred)
-
                 if accuracy is None:
                     break
                 accuracies.append(accuracy)
@@ -185,21 +223,21 @@ if __name__ == '__main__':
 
     datasets = ['../data/processed/fa_RPLControl.csv']
     models = {
-        # 'Random Forest': RandomForestClassifier(
-        #     n_estimators=800, criterion='entropy', max_depth=30, max_features='sqrt',
-        #     min_samples_leaf=1, min_samples_split=2, class_weight='balanced'),
+        'Random Forest': RandomForestClassifier(
+            n_estimators=1000, criterion='entropy', max_depth=30, max_features='sqrt',
+            min_samples_leaf=1, min_samples_split=2, class_weight=None),
 
-        'Gradient Boost': GradientBoostingClassifier(
-                    n_estimators=800, subsample=0.7, max_depth=4, max_features='sqrt',
-                    min_samples_leaf=1, min_samples_split=5, learning_rate=0.1),
+        # 'Gradient Boost': GradientBoostingClassifier(
+        #     n_estimators=800, subsample=0.7, max_depth=4, max_features='sqrt',
+        #     min_samples_leaf=2, min_samples_split=5, learning_rate=0.2),
 
-        #'MLPClassifier': MLPClassifier(
-            #activation='relu', alpha=0.0001, hidden_layer_sizes=(100,50), learning_rate='constant',
-            #learning_rate_init=0.01, max_iter=500, solver='adam'),
+        # 'MLPClassifier': MLPClassifier(
+        #    activation='tanh', alpha=0.001, hidden_layer_sizes=(100,50), learning_rate='constant',
+        #    learning_rate_init=0.01, max_iter=500, solver='adam'),
 
-        #'KNeighbors': KNeighborsClassifier(),
-        #'SVC': SVC(C=100, degree=2, gamma=1, kernel='rbf', shrinking=True),
-        #'LinearSVC': LinearSVC(C=10, dual=True, loss='squared_hinge', max_iter=5000, penalty='l2'),
+        # 'KNeighbors': KNeighborsClassifier(,
+        # 'SVC': SVC(C=100, degree=2, gamma=1, kernel='rbf', shrinking=True),
+        # 'LinearSVC': LinearSVC(C=10, dual=True, loss='squared_hinge', max_iter=5000, penalty='l2'),
     }
 
-    main(datasets, models, iterations=4, gscv=True, clf_report=False)
+    main(datasets, models, iterations=1, gscv=False, clf_report=True)

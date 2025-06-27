@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from sklearn.impute import KNNImputer
 
 if __name__ == '__main__':
     # convert excel to csv
@@ -32,14 +33,17 @@ if __name__ == '__main__':
     # remove redundant columns 
     df = df.drop(['mrn', 'rif', 'rpl', 'rpl_1', 'rif_1'], axis=1)
 
+    # filter out all rows of the target column which are 0 or empty
+    df.fillna({'target': 0}, inplace=True)
+    df = df[df['target'] != 0.0]
+
     # clean gestational age column ("new" becomes 0)
     df['ga'] = pd.to_numeric(df['ga'], errors='coerce')
     df.fillna({'ga': 0}, inplace=True)
 
     # clean th17 column (values <1 become 0.1)
-    is_lt_one = df['th17'] == '<1'
-    df.loc[is_lt_one, 'th17'] = 0.1
-    df['th17'] = pd.to_numeric(df['th17'])
+    df['th17'] = df['th17'].replace('<1', 0.1)
+    df['th17'] = pd.to_numeric(df['th17'], errors='coerce')
 
     # fill empty with 0 for endometriosis, adenomyosis, pcos, and fibroids
     df.fillna({'endometriosis': 0}, inplace=True)
@@ -48,24 +52,26 @@ if __name__ == '__main__':
     df.fillna({'fibroids': 0}, inplace=True)
 
     # interpolate missing values
-    cols_for_lin_interp = ['th17', 'treg']
-    df[cols_for_lin_interp] = df[cols_for_lin_interp].interpolate(method='linear', limit_direction='both')
+    cols_to_interp = ['th17', 'treg', 'ifn_pos', 'ifn_neg']
+    df[cols_to_interp] = df[cols_to_interp].interpolate(method='linear', limit_direction='both')
 
-    cols_for_spline_interp = [ 'ifn_pos', 'ifn_neg']
-    df[cols_for_spline_interp] = df[cols_for_spline_interp].interpolate(method='spline', order=3, limit_direction='both')
+    # KNN imputation
+    #imputer = KNNImputer(n_neighbors=5)
+    #df[cols_to_interp] = imputer.fit_transform(df[cols_to_interp])
 
-    # calculate ratios 
+    # outlier handling
+    Q1 = df['th17'].quantile(0.25)
+    Q3 = df['th17'].quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    outliers = df[(df['th17'] < lower_bound) | (df['th17'] > upper_bound)]
+    print(f"Found {len(outliers)} outliers in the 'th17' column.")
+    df['th17'] = np.clip(df['th17'], lower_bound, upper_bound)
+
+    # # calculate ratios 
     df['th17_treg_ratio'] = df['th17'] / df['treg'].replace(0, np.nan)
     df['pos_neg_ratio'] = df['ifn_pos'] / df['ifn_neg'].replace(0, np.nan)
-    #df['th17_treg_ratio'].fillna(df['th17_treg_ratio'].median(), inplace=True)
-    #df['double_pos_neg_ratio'].fillna(df['double_pos_neg_ratio'].median(), inplace=True)
-
-    # remove features to reduce multicollinearity
-    #df = df.drop(['th17_cd4_il17_ifn_pos', 'double_pos_neg_ratio', 'th17_treg_ratio'], axis=1)
-
-    # filter out all rows of the target column which are 0 or empty
-    df.fillna({'target': 0}, inplace=True)
-    df = df[df['target'] != 0.0]
 
     # export 
     df.to_csv('../data/processed/fa_RPLControl.csv', index=False)
